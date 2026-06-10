@@ -8,18 +8,26 @@ with [Keycloak](https://www.keycloak.org/securing-apps/mcp-authz-server) as the 
 
 ## Architecture
 
+Client identity uses **CIMD** (Client ID Metadata Documents, SEP-991 — the preferred
+mechanism since the 2025-11-25 MCP spec): the client's `client_id` *is a URL* hosted by
+its vendor; Keycloak fetches the metadata from that URL on demand. No dynamic client
+registration, no client records accumulating per auth attempt, no registration proxy.
+
 ```
 ┌─────────────┐  1. POST /mcp (no token) ──► 401 + WWW-Authenticate   ┌──────────────────┐
 │ Claude Code │  2. GET /.well-known/oauth-protected-resource         │ FastAPI app      │
 │ (OAuth      │ ────────────────────────────────────────────────────► │ :8000            │
 │  client)    │     "authorization_servers": [keycloak realm]         │ (resource server)│
 │             │                                                       └──────────────────┘
-│             │  3. discovery + dynamic client registration  ┌──────────────────┐
-│             │ ───────────────────────────────────────────► │ Keycloak :8080   │
-│             │  4. browser → user logs in (alex/alex123)    │ realm "mcp"      │
-│             │  5. token request (PKCE)                     │ (authorization   │
-│             │ ◄─────────────── access token (JWT) ──────── │  server)         │
-│             │                                              └──────────────────┘
+│             │  3. authorize with client_id = <metadata URL>  ┌──────────────────┐
+│             │ ─────────────────────────────────────────────► │ Keycloak :8080   │
+│             │     Keycloak fetches the client metadata URL,  │ realm "mcp"      │
+│             │     validates it against the CIMD policy       │ (authorization   │
+│             │  4. browser → user logs in (alex/alex123)      │  server,         │
+│             │     and consents to the client                 │  --features=cimd)│
+│             │  5. token request (PKCE)                       │                  │
+│             │ ◄─────────────── access token (JWT) ────────── │                  │
+│             │                                                └──────────────────┘
 │             │  6. POST /mcp  Authorization: Bearer <JWT>  ──► validated against
 └─────────────┘                                                  Keycloak JWKS + audience
 ```
@@ -63,30 +71,35 @@ A browser opens on the Keycloak login page; sign in as `alex` / `alex123`. After
 | Token validation (JWKS, issuer, audience) | `app/auth.py` |
 | 401 + `WWW-Authenticate` pointing at resource metadata (RFC 9728 §5.1) | `app/auth.py:_unauthorized` |
 | Protected resource metadata (RFC 9728) | `app/main.py:protected_resource_metadata` |
-| Authorization server metadata at app origin (RFC 8414, legacy MCP 2025-03-26 discovery) | `AuthConfig(custom_oauth_metadata=...)` in `app/main.py` |
-| Real AS metadata, login UI, token issuance, PKCE | Keycloak (`keycloak/realm-mcp.json`) |
-| Dynamic client registration (RFC 7591) | App proxy `POST /oauth/register` → Keycloak `clients-registrations/openid-connect` |
-| Token audience binding (RFC 8707 substitute) | Keycloak audience mapper in realm-default scope `hello-mcp-claims` |
+| AS metadata, login UI, consent, token issuance, PKCE | Keycloak (`keycloak/realm-mcp.json`) |
+| Client identity (CIMD / SEP-991) | Keycloak `--features=cimd` + `clientProfiles`/`clientPolicies` in the realm file |
+| Token audience binding (RFC 8707 substitute) | Keycloak audience mapper in realm-default scope `hello-mcp-claims` (duplicated in `profile` for clients without realm defaults) |
 
 ## Keycloak realm notes (`keycloak/realm-mcp.json`)
 
 - **Realm `mcp`** is imported automatically on container start (`--import-realm`).
-- **Anonymous dynamic client registration** is enabled via the Trusted Hosts policy:
-  host verification is off, but registered client redirect URIs must point at
-  `localhost`/`127.0.0.1`. There is deliberately no "Allowed Client Scopes" registration
-  policy — it rejected MCP clients' `scope` requests even for whitelisted scopes.
-  This is sandbox-grade; real deployments restrict registration further.
-- **Registration goes through the app's proxy** (`POST /oauth/register` in
-  `app/main.py`), not straight to Keycloak. Keycloak's DCR sets a new client's scopes to
-  exactly what the registration requested (wiping realm defaults), and its authorize
-  endpoint hard-rejects requested-but-unassigned scopes. MCP clients register with one
-  scope set but authorize with `offline_access` added — so the proxy rewrites the
-  registration scope to the full set. The `profile` scope carries the audience + identity
-  mappers, so dynamically registered clients mint valid tokens with no manual patching.
-  This is the same trick fastapi-mcp's `setup_proxies=True` does for Auth0.
-- **Audience mapper**: the realm-default client scope `hello-mcp-claims` stamps
-  `aud: http://localhost:8000/mcp` plus `sub`/`preferred_username`/`email` claims into every
-  access token, so the resource server can verify tokens were minted *for it*.
+- **CIMD client policy** (`clientProfiles`/`clientPolicies` in the realm file): URL
+  client_ids are accepted when their domain matches the trusted list (`claude.ai`,
+  `claude.com`, `anthropic.com` + subdomains, plus `host.docker.internal`/`localhost`
+  for local testing). `cimd-allow-http-scheme` is on for the sandbox; production would
+  be https-only with a tight domain list. CIMD is experimental in Keycloak 26.6
+  (`--features=cimd`). If a client's domain isn't trusted, the authorize request fails
+  with `client_not_found` — check `docker logs` for `not trusted domain: host = ...`
+  and extend the list.
+- **CIMD clients require user consent** (Keycloak forces it for URL-identified
+  clients) — the browser flow shows a grant screen after login.
+- **`offline_access` needs a realm role**: MCP clients request the `offline_access`
+  scope for refresh tokens, and Keycloak only issues offline tokens to users holding the
+  `offline_access` realm role — granted to the test user in the realm file.
+- **Why claims live in client scopes**: the audience + identity mappers sit in the
+  realm-default scope `hello-mcp-claims` (and duplicated in `profile`), so any client —
+  including transient CIMD clients — mints tokens our resource server accepts.
+- **Anonymous DCR remains available** (Trusted Hosts policy, localhost redirect URIs
+  only) as the legacy fallback, but spec-compliant clients prefer CIMD when the AS
+  advertises `client_id_metadata_document_supported: true`. Note Keycloak's DCR has a
+  quirk: it sets a new client's scopes to exactly the registration request (wiping realm
+  defaults), which then trips its strict authorize-time scope validation — that's why
+  the DCR era of this repo needed a registration proxy (see git history).
 - **`test-cli` client** allows headless testing via the password grant:
 
 ```bash
@@ -107,8 +120,9 @@ curl -s http://localhost:8000/me -H "Authorization: Bearer $TOKEN"
 
 ## Toward real hosting
 
-- Serve everything over HTTPS (OAuth endpoints require it for non-localhost).
-- Replace the sandbox Keycloak (dev mode, in-memory-ish DB, open DCR) with a hardened
-  instance or a hosted IdP (Auth0 etc. — fastapi-mcp has `setup_proxies=True` for providers
-  without dynamic client registration).
-- Pin down the Trusted Hosts registration policy and turn consent screens back on.
+- Serve everything over HTTPS (OAuth endpoints require it for non-localhost), and turn
+  off `cimd-allow-http-scheme`.
+- Replace the sandbox Keycloak (dev mode, file DB, permissive policies) with a hardened
+  instance or a hosted IdP with MCP support (Auth0, WorkOS, etc.).
+- Tighten the CIMD trusted-domain list to exactly the clients you expect, and remove the
+  legacy anonymous-DCR registration policy.

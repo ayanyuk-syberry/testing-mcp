@@ -1,10 +1,11 @@
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4
-    command: start-dev --import-realm
+    image: quay.io/keycloak/keycloak:26.6
+    command: start-dev --import-realm --features=cimd
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_LOG_LEVEL: "info,org.keycloak.services.clientpolicy:trace,org.keycloak.protocol.oauth2.cimd:trace"
     ports:
       - "8080:8080"
     volumes:

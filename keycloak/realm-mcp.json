@@ -11,6 +11,7 @@
       "firstName": "Alex",
       "lastName": "Tester",
       "email": "alex@example.com",
+      "realmRoles": ["offline_access"],
       "credentials": [
         {
           "type": "password",
@@ -163,6 +164,54 @@
     }
   ],
   "defaultDefaultClientScopes": ["hello-mcp-claims", "profile", "email"],
+  "clientProfiles": {
+    "profiles": [
+      {
+        "name": "cimd-profile",
+        "description": "Accept CIMD clients (sandbox: any domain, http allowed)",
+        "executors": [
+          {
+            "executor": "client-id-metadata-document",
+            "configuration": {
+              "cimd-allow-http-scheme": true,
+              "cimd-restrict-same-domain": false,
+              "cimd-allow-permitted-domains": [
+                "claude.ai", "*.claude.ai",
+                "claude.com", "*.claude.com",
+                "anthropic.com", "*.anthropic.com",
+                "host.docker.internal", "localhost"
+              ],
+              "only-allow-confidential-client": false
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "clientPolicies": {
+    "policies": [
+      {
+        "name": "cimd-policy",
+        "description": "Apply CIMD acceptance to URL client_ids",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "client-id-uri",
+            "configuration": {
+              "client-id-uri-scheme": ["http", "https"],
+              "client-id-uri-allow-permitted-domains": [
+                "claude.ai", "*.claude.ai",
+                "claude.com", "*.claude.com",
+                "anthropic.com", "*.anthropic.com",
+                "host.docker.internal", "localhost"
+              ]
+            }
+          }
+        ],
+        "profiles": ["cimd-profile"]
+      }
+    ]
+  },
   "components": {
     "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy": [
       {

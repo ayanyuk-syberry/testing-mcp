@@ -3,6 +3,7 @@ from fastapi_mcp import AuthConfig, FastApiMCP
 from pydantic import BaseModel
 
 from app.auth import AUDIENCE, KEYCLOAK_ISSUER, verify_token
+from app.jobs import router as jobs_router
 
 
 class HelloResponse(BaseModel):
@@ -35,6 +36,11 @@ async def whoami(claims: dict = Depends(verify_token)) -> WhoAmIResponse:
         email=claims.get("email"),
         subject=claims["sub"],
     )
+
+
+# Job-pattern endpoints (start_job / get_job_status / get_job_result / cancel_job)
+# for long-running tool calls — must be included before FastApiMCP is instantiated.
+app.include_router(jobs_router)
 
 
 # RFC 9728 protected resource metadata: tells MCP clients which authorization

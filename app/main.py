@@ -1,3 +1,4 @@
+import boto3
 from fastapi import Depends, FastAPI
 from fastapi_mcp import AuthConfig, FastApiMCP
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ class WhoAmIResponse(BaseModel):
     username: str
     email: str | None = None
     subject: str
+    arn: str
 
 
 app = FastAPI(
@@ -29,12 +31,17 @@ async def hello(name: str = "world") -> HelloResponse:
 
 
 @app.get("/me", operation_id="whoami", response_model=WhoAmIResponse)
-async def whoami(claims: dict = Depends(verify_token)) -> WhoAmIResponse:
-    """Return the identity of the logged-in user, taken from the OAuth access token."""
+def whoami(claims: dict = Depends(verify_token)) -> WhoAmIResponse:
+    """Return the identity of the logged-in user, taken from the OAuth access token,
+    plus the AWS caller-identity ARN of the assumed PersonalAccess role."""
+    # "personal" is a machine-local profile: SSO role PersonalAccess in 905418478567.
+    # Requires a valid `aws sso login` session.
+    sts = boto3.Session(profile_name="personal").client("sts")
     return WhoAmIResponse(
         username=claims.get("preferred_username", "<unknown>"),
         email=claims.get("email"),
         subject=claims["sub"],
+        arn=sts.get_caller_identity()["Arn"],
     )
 
 

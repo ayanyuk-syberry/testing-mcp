@@ -23,6 +23,11 @@ uv run uvicorn app.main:app --reload --port 8000
 # Register in Claude Code (auth via /mcp → Authenticate; test user alex/alex123)
 claude mcp add --transport http hello-mcp http://localhost:8000/mcp
 
+# Alternative: static pre-registered client instead of CIMD (the `claude-code` client in
+# the realm file; --callback-port must match its registered redirect URI port)
+claude mcp add --transport http hello-mcp-static http://localhost:8000/mcp \
+  --client-id claude-code --callback-port 8765
+
 # Headless auth for testing (password grant via the test-cli client)
 TOKEN=$(curl -s -X POST http://localhost:8080/realms/mcp/protocol/openid-connect/token \
   -d 'grant_type=password&client_id=test-cli&username=alex&password=alex123&scope=openid' \
@@ -61,7 +66,9 @@ Three parties, strict role separation (the spec's core lesson — keep it that w
   it on demand. No client registration state. Anonymous DCR still exists as legacy
   fallback but has a known Keycloak quirk (registration wipes realm-default scopes,
   then authorize-time scope validation hard-rejects) — that's why the DCR era needed a
-  registration proxy; don't resurrect it.
+  registration proxy; don't resurrect it. The realm also carries a static `claude-code`
+  client demonstrating the third registration model (manual pre-registration, what
+  CIMD/DCR exist to avoid) — connect with `--client-id claude-code --callback-port 8765`.
 
 ### fastapi-mcp specifics
 

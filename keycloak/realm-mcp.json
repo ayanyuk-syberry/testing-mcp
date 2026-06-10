@@ -32,6 +32,22 @@
       "directAccessGrantsEnabled": true,
       "standardFlowEnabled": false,
       "protocol": "openid-connect"
+    },
+    {
+      "clientId": "claude-code",
+      "name": "Claude Code (manually pre-registered static client, alternative to CIMD)",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:8765/callback",
+        "http://127.0.0.1:8765/callback"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
     }
   ],
   "clientScopes": [

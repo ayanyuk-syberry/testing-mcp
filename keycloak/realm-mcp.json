@@ -11,7 +11,9 @@
       "firstName": "Alex",
       "lastName": "Tester",
       "email": "alex@example.com",
-      "realmRoles": ["offline_access"],
+      "realmRoles": [
+        "offline_access"
+      ],
       "credentials": [
         {
           "type": "password",
@@ -163,7 +165,11 @@
       ]
     }
   ],
-  "defaultDefaultClientScopes": ["hello-mcp-claims", "profile", "email"],
+  "defaultDefaultClientScopes": [
+    "hello-mcp-claims",
+    "profile",
+    "email"
+  ],
   "clientProfiles": {
     "profiles": [
       {
@@ -176,10 +182,15 @@
               "cimd-allow-http-scheme": true,
               "cimd-restrict-same-domain": false,
               "cimd-allow-permitted-domains": [
-                "claude.ai", "*.claude.ai",
-                "claude.com", "*.claude.com",
-                "anthropic.com", "*.anthropic.com",
-                "host.docker.internal", "localhost"
+                "claude.ai",
+                "*.claude.ai",
+                "claude.com",
+                "*.claude.com",
+                "anthropic.com",
+                "*.anthropic.com",
+                "host.docker.internal",
+                "localhost",
+                "127.0.0.1"
               ],
               "only-allow-confidential-client": false
             }
@@ -198,17 +209,27 @@
           {
             "condition": "client-id-uri",
             "configuration": {
-              "client-id-uri-scheme": ["http", "https"],
+              "client-id-uri-scheme": [
+                "http",
+                "https"
+              ],
               "client-id-uri-allow-permitted-domains": [
-                "claude.ai", "*.claude.ai",
-                "claude.com", "*.claude.com",
-                "anthropic.com", "*.anthropic.com",
-                "host.docker.internal", "localhost"
+                "claude.ai",
+                "*.claude.ai",
+                "claude.com",
+                "*.claude.com",
+                "anthropic.com",
+                "*.anthropic.com",
+                "host.docker.internal",
+                "localhost",
+                "127.0.0.1"
               ]
             }
           }
         ],
-        "profiles": ["cimd-profile"]
+        "profiles": [
+          "cimd-profile"
+        ]
       }
     ]
   },
@@ -220,9 +241,16 @@
         "subType": "anonymous",
         "subComponents": {},
         "config": {
-          "trusted-hosts": ["localhost", "127.0.0.1"],
-          "host-sending-registration-request-must-match": ["false"],
-          "client-uris-must-match": ["true"]
+          "trusted-hosts": [
+            "localhost",
+            "127.0.0.1"
+          ],
+          "host-sending-registration-request-must-match": [
+            "false"
+          ],
+          "client-uris-must-match": [
+            "true"
+          ]
         }
       },
       {
@@ -231,7 +259,9 @@
         "subType": "anonymous",
         "subComponents": {},
         "config": {
-          "max-clients": ["200"]
+          "max-clients": [
+            "200"
+          ]
         }
       }
     ]

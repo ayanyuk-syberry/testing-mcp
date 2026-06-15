@@ -99,9 +99,10 @@ async def start_job(
 ) -> StartJobResponse:
     """Start a long-running job (it sleeps for duration_seconds, 120 by default).
 
-    Returns immediately with a job_id. The job runs in the background; poll
-    get_job_status no more often than every 15 seconds, and call get_job_result
-    only once the status is 'completed'.
+    Returns immediately with a job_id. The job runs in the background. After
+    starting, keep polling get_job_status every 15 seconds until the status is
+    'completed' (don't ask the user first), then call get_job_result. Do not poll
+    more often than every 15 seconds.
     """
     job_id = str(uuid4())
     job = Job(owner=claims["sub"], duration=duration_seconds)

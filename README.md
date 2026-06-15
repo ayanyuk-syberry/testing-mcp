@@ -64,6 +64,34 @@ Then inside a Claude Code session run `/mcp` → select `hello-mcp` → **Authen
 A browser opens on the Keycloak login page; sign in as `alex` / `alex123`. After that the
 `hello_world` and `whoami` tools work, and `whoami` returns the logged-in user.
 
+## Alternative implementation: FastMCP (`fastmcp_app/`)
+
+`fastmcp_app/` is a second implementation of the *same* `hello-mcp` server, built on the
+**MCP SDK's `FastMCP`** (`mcp.server.fastmcp`) instead of fastapi-mcp. Same Keycloak
+realm, same `http://localhost:8000/mcp` audience, same tools (`hello_world`, `whoami`, and
+the job pattern) — it's a side-by-side comparison of the two ways to stand up an
+OAuth-protected MCP server:
+
+| | `app/` (fastapi-mcp) | `fastmcp_app/` (FastMCP) |
+|---|---|---|
+| Tools defined by | REST endpoints + `operation_id` | native `@mcp.tool()` decorators |
+| Token validation | FastAPI `Depends(verify_token)` (`app/auth.py`) | `TokenVerifier.verify_token` (`fastmcp_app/auth.py`) |
+| RFC 9728 metadata route | hand-written in `app/main.py` | auto-served by setting `AuthSettings.resource_server_url` |
+| Reading caller claims in a tool | `claims` injected via the dependency | `get_access_token().claims` |
+| Tool errors | FastAPI `HTTPException` | `ToolError` |
+
+Run it **instead of** the FastAPI app (it takes the same port 8000, so the two don't run
+at once):
+
+```bash
+uv run uvicorn fastmcp_app.main:app --reload --port 8000
+claude mcp add --transport http hello-mcp-fastmcp http://localhost:8000/mcp
+```
+
+> One difference from the fastapi-mcp version: FastMCP auto-serves only the path-suffixed
+> metadata route (`/.well-known/oauth-protected-resource/mcp`), not the bare-root variant
+> `app/main.py` also serves manually. Claude Code uses the suffixed form, so this is fine.
+
 ## What implements what
 
 | Piece | Where |

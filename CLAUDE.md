@@ -20,6 +20,10 @@ docker compose up -d
 # The API / MCP server (Python 3.13, uv-managed)
 uv run uvicorn app.main:app --reload --port 8000
 
+# Alternative implementation of the SAME server using the MCP SDK's FastMCP instead of
+# fastapi-mcp (same realm/audience/tools; run INSTEAD of app.main — it takes port 8000 too)
+uv run uvicorn fastmcp_app.main:app --reload --port 8000
+
 # Register in Claude Code (auth via /mcp → Authenticate; test user alex/alex123)
 claude mcp add --transport http hello-mcp http://localhost:8000/mcp
 
@@ -57,6 +61,14 @@ Three parties, strict role separation (the spec's core lesson — keep it that w
   (RFC 9728, served in `app/main.py`), which names Keycloak as the authorization server.
   Everything else — discovery, CIMD client resolution, login, consent, PKCE, token
   issuance, refresh — happens at Keycloak.
+- **`fastmcp_app/` is the same resource server, reimplemented on the MCP SDK's
+  `FastMCP`** (not fastapi-mcp). Same realm, same `http://localhost:8000/mcp` audience,
+  same tools — it exists as a side-by-side comparison and is run *instead of* `app.main`
+  (same port). It reuses the load-bearing constants and the job-pattern core from `app/`
+  (`fastmcp_app/auth.py` imports `AUDIENCE`/`KEYCLOAK_ISSUER` from `app.auth`;
+  `fastmcp_app/main.py` imports the `Job`/`_run_job`/`_jobs` core from `app.jobs`), so
+  keep that logic single-sourced — change it in `app/`, not by forking. See the
+  "fastmcp-specifics" subsection below.
 - **Keycloak config lives entirely in `keycloak/realm-mcp.json`** and must stay
   reproducible from `docker compose up` alone; never leave manual admin-console changes
   as the only copy. CIMD is experimental (`--features=cimd`, Keycloak 26.6) and is
@@ -80,6 +92,24 @@ Three parties, strict role separation (the spec's core lesson — keep it that w
 - Auth plugs in via `AuthConfig(dependencies=[Depends(verify_token)])`; fastapi-mcp
   forwards the `Authorization` header from the MCP request into internal tool
   invocations, so protected endpoints (like `/me`) can read the caller's token claims.
+
+### fastmcp specifics (the MCP SDK's `FastMCP`, `fastmcp_app/`)
+
+- Tools are declared natively with `@mcp.tool(name=...)`; the docstring becomes the tool
+  description and the return type's schema (a Pydantic model) becomes the output schema.
+- Auth is a `TokenVerifier` (`fastmcp_app/auth.py:KeycloakTokenVerifier`) whose
+  `verify_token` returns an `AccessToken` (with the decoded JWT in `.claims`) or `None`.
+  Pass it as `token_verifier=` plus `auth=AuthSettings(issuer_url=..., resource_server_url=
+  AUDIENCE, required_scopes=None)`. Setting `resource_server_url` makes the SDK
+  auto-serve the RFC 9728 metadata route (`/.well-known/oauth-protected-resource/mcp`
+  only — not the bare-root variant `app/main.py` also serves) and enforce bearer auth on
+  the whole `/mcp` endpoint. The whole endpoint is protected — no per-tool public/private
+  split.
+- Inside a tool, read the caller with `get_access_token()` from
+  `mcp.server.auth.middleware.auth_context` (`.claims`, `.subject`). Raise
+  `mcp.server.fastmcp.exceptions.ToolError` for tool-level errors.
+- `json_response=True` matches the buffered single-response transport the job pattern
+  assumes. Serve it under uvicorn via the module-level `app = mcp.streamable_http_app()`.
 
 ### Load-bearing strings (change all together or break auth)
 

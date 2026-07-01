@@ -61,8 +61,21 @@ claude mcp add --transport http hello-mcp http://localhost:8000/mcp
 ```
 
 Then inside a Claude Code session run `/mcp` → select `hello-mcp` → **Authenticate**.
-A browser opens on the Keycloak login page; sign in as `alex` / `alex123`. After that the
-`hello_world` and `whoami` tools work, and `whoami` returns the logged-in user.
+A browser opens on the Keycloak login page; sign in as `alex` / `alex123`. After that all
+the tools work: `hello_world`, `whoami` (returns the logged-in user), and the job-pattern
+tools `start_job` / `get_job_status` / `get_job_result` / `cancel_job` (implemented in
+`app/jobs.py`, for long-running tool calls).
+
+### Alternative: static pre-registered client (instead of CIMD)
+
+The realm also carries a `claude-code` client demonstrating the third registration model —
+manual pre-registration (what CIMD and DCR exist to avoid). Connect with an explicit
+`client_id` and the callback port matching its registered redirect URI:
+
+```bash
+claude mcp add --transport http hello-mcp-static http://localhost:8000/mcp \
+  --client-id claude-code --callback-port 8765
+```
 
 ## Alternative implementation: FastMCP (`fastmcp_app/`)
 
@@ -97,6 +110,7 @@ claude mcp add --transport http hello-mcp-fastmcp http://localhost:8000/mcp
 | Piece | Where |
 |---|---|
 | Token validation (JWKS, issuer, audience) | `app/auth.py` |
+| Job pattern for long-running tools (`start_job` / `get_job_status` / `get_job_result` / `cancel_job`) | `app/jobs.py` (mounted in `app/main.py`; reused by `fastmcp_app/main.py`) |
 | 401 + `WWW-Authenticate` pointing at resource metadata (RFC 9728 §5.1) | `app/auth.py:_unauthorized` |
 | Protected resource metadata (RFC 9728) | `app/main.py:protected_resource_metadata` |
 | AS metadata, login UI, consent, token issuance, PKCE | Keycloak (`keycloak/realm-mcp.json`) |
@@ -128,6 +142,11 @@ claude mcp add --transport http hello-mcp-fastmcp http://localhost:8000/mcp
   quirk: it sets a new client's scopes to exactly the registration request (wiping realm
   defaults), which then trips its strict authorize-time scope validation — that's why
   the DCR era of this repo needed a registration proxy (see git history).
+- **Static `claude-code` client** is pre-registered in the realm as the third
+  registration model — manual pre-registration, the classic approach CIMD and DCR exist
+  to avoid. It has a fixed `client_id` (`claude-code`) and a fixed localhost redirect URI,
+  so clients must supply both a matching `--client-id` and `--callback-port` (see
+  "Alternative: static pre-registered client" above).
 - **`test-cli` client** allows headless testing via the password grant:
 
 ```bash

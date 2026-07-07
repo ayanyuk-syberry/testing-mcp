@@ -10,9 +10,10 @@ REST-first:
   SDK's `TokenVerifier` + `AuthSettings`. Setting `resource_server_url` makes the
   SDK auto-serve the RFC 9728 metadata route and enforce bearer auth on `/mcp`.
 
-Run this *instead of* the FastAPI app (it takes the same port 8000):
+Run this *instead of* the FastAPI app (it takes the same port 8001, behind
+the oauth2-proxy that owns the public :8000):
 
-    uv run uvicorn fastmcp_app.main:app --reload --port 8000
+    uv run uvicorn fastmcp_app.main:app --reload --port 8001
 """
 
 import asyncio
@@ -82,7 +83,7 @@ def whoami() -> WhoAmIResponse:
     claims = get_access_token().claims
     # "personal" is a machine-local profile: SSO role PersonalAccess in 905418478567.
     # Requires a valid `aws sso login` session.
-    sts = boto3.Session(profile_name="personal").client("sts")
+    sts = boto3.Session(profile_name="default").client("sts")
     return WhoAmIResponse(
         username=claims.get("preferred_username", "<unknown>"),
         email=claims.get("email"),

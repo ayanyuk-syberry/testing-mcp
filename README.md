@@ -4,7 +4,9 @@ Experimental FastAPI service that doubles as an MCP server, built with
 [fastapi-mcp](https://github.com/tadata-org/fastapi_mcp): regular REST endpoints are
 automatically exposed as MCP tools over streamable HTTP — now protected with **OAuth 2.1**
 per the [MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization),
-with [Keycloak](https://www.keycloak.org/securing-apps/mcp-authz-server) as the authorization server.
+with [Keycloak](https://www.keycloak.org/securing-apps/mcp-authz-server) as the authorization server
+and [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) as the token-verifying
+gatekeeper in front of the app.
 
 ## Architecture
 
@@ -13,41 +15,62 @@ mechanism since the 2025-11-25 MCP spec): the client's `client_id` *is a URL* ho
 its vendor; Keycloak fetches the metadata from that URL on demand. No dynamic client
 registration, no client records accumulating per auth attempt, no registration proxy.
 
+The public port :8000 is owned by **oauth2-proxy** (docker), which validates every
+bearer JWT (signature via Keycloak's JWKS, issuer, audience `http://localhost:8000/mcp`
+— `--skip-jwt-bearer-tokens`) and proxies to the app on :8001, which **trusts the proxy**
+and only decodes the forwarded token for its claims:
+
 ```
-┌─────────────┐  1. POST /mcp (no token) ──► 401 + WWW-Authenticate   ┌──────────────────┐
-│ Claude Code │  2. GET /.well-known/oauth-protected-resource         │ FastAPI app      │
-│ (OAuth      │ ────────────────────────────────────────────────────► │ :8000            │
-│  client)    │     "authorization_servers": [keycloak realm]         │ (resource server)│
-│             │                                                       └──────────────────┘
-│             │  3. authorize with client_id = <metadata URL>  ┌──────────────────┐
-│             │ ─────────────────────────────────────────────► │ Keycloak :8080   │
-│             │     Keycloak fetches the client metadata URL,  │ realm "mcp"      │
-│             │     validates it against the CIMD policy       │ (authorization   │
-│             │  4. browser → user logs in (alex/alex123)      │  server,         │
-│             │     and consents to the client                 │  --features=cimd)│
-│             │  5. token request (PKCE)                       │                  │
-│             │ ◄─────────────── access token (JWT) ────────── │                  │
-│             │                                                └──────────────────┘
-│             │  6. POST /mcp  Authorization: Bearer <JWT>  ──► validated against
-└─────────────┘                                                  Keycloak JWKS + audience
+┌─────────────┐  1. POST /mcp (no token) ──► bare 401            ┌───────────────────┐
+│ Claude Code │  2. GET /.well-known/oauth-protected-resource    │ oauth2-proxy      │
+│ (OAuth      │ ───────────────────────────────────────────────► │ :8000 (docker)    │
+│  client)    │     passed through unauthenticated to the app;   │ verifies JWTs,    │
+│             │     "authorization_servers": [keycloak realm]    │ 401s API routes   │
+│             │                                                  └────────┬──────────┘
+│             │  3. authorize with client_id = <metadata URL>            │ forwards
+│             │ ──────────────────────────────────► ┌──────────────────┐ │ verified JWT
+│             │     Keycloak fetches the client     │ Keycloak :8080   │ ▼
+│             │     metadata URL, validates it      │ realm "mcp"      │ ┌───────────────┐
+│             │     against the CIMD policy         │ (authorization   │ │ FastAPI app   │
+│             │  4. browser → user logs in          │  server,         │ │ :8001 (host)  │
+│             │     (alex/alex123) and consents     │  --features=cimd)│ │ decodes claims│
+│             │  5. token request (PKCE)            │        ▲         │ │ trusts proxy  │
+│             │ ◄──── access token (JWT) ────────── │        │ JWKS    │ └───────────────┘
+│             │                                     └────────┼─────────┘
+│             │  6. POST /mcp  Bearer <JWT> ──► oauth2-proxy ─┘ (in-network keycloak:8080)
+└─────────────┘
 ```
 
-The FastAPI app never sees a password — it only **validates JWTs** (signature via
-Keycloak's JWKS, issuer, and audience `http://localhost:8000/mcp`) in
-`app/auth.py:verify_token`. The `whoami` tool reads the user's identity from token claims.
+The app never sees a password and no longer verifies signatures itself — verification
+lives in oauth2-proxy; `app/auth.py:verify_token` just decodes the proxy-forwarded JWT
+(`decode_forwarded_claims`). The `whoami` tool reads the user's identity from token claims.
+
+> **Trust boundary caveat:** anything that reaches uvicorn directly on :8001 bypasses
+> authentication entirely. Fine for this localhost sandbox; real hosting must make the
+> app port reachable only by the proxy.
+
+Note the 401 nuance: oauth2-proxy's 401 carries no `WWW-Authenticate: resource_metadata`
+header (the app's pre-proxy 401 did). Claude Code's discovery chain doesn't need it — it
+proactively checks `/.well-known/oauth-protected-resource` (then falls back to RFC 8414
+`/.well-known/oauth-authorization-server`), and those paths pass through the proxy
+unauthenticated (`--skip-auth-routes`). If a client ever fails here, pin discovery with
+`"oauth": {"authServerMetadataUrl": "http://localhost:8080/realms/mcp/.well-known/openid-configuration"}`
+in its MCP server config.
 
 ## Run
 
 ```bash
-# 1. Authorization server (Keycloak with pre-imported realm "mcp")
+# 1. Keycloak (authorization server) + oauth2-proxy (gatekeeper on :8000)
 docker compose up -d        # takes ~30s; admin console at :8080 (admin/admin)
 
-# 2. The API / MCP server
-uv run uvicorn app.main:app --reload --port 8000
+# 2. The API / MCP server — on :8001, BEHIND the proxy
+uv run uvicorn app.main:app --reload --port 8001
 ```
 
-- REST: http://localhost:8000/hello (public), http://localhost:8000/me (needs token), docs at /docs
+- REST (all through the proxy): http://localhost:8000/hello (public),
+  http://localhost:8000/me (needs token), docs at /docs
 - MCP (streamable HTTP, OAuth-protected): http://localhost:8000/mcp
+- Browser cookie flow (manual test of the proxy itself): http://localhost:8000/oauth2/sign_in
 - Test user: **alex / alex123**
 
 > Note: this machine's shell exports `UV_DEFAULT_INDEX` pointing at a private
@@ -93,11 +116,11 @@ OAuth-protected MCP server:
 | Reading caller claims in a tool | `claims` injected via the dependency | `get_access_token().claims` |
 | Tool errors | FastAPI `HTTPException` | `ToolError` |
 
-Run it **instead of** the FastAPI app (it takes the same port 8000, so the two don't run
-at once):
+Run it **instead of** the FastAPI app (it takes the same port 8001 behind the proxy, so
+the two don't run at once):
 
 ```bash
-uv run uvicorn fastmcp_app.main:app --reload --port 8000
+uv run uvicorn fastmcp_app.main:app --reload --port 8001
 claude mcp add --transport http hello-mcp-fastmcp http://localhost:8000/mcp
 ```
 
@@ -109,9 +132,10 @@ claude mcp add --transport http hello-mcp-fastmcp http://localhost:8000/mcp
 
 | Piece | Where |
 |---|---|
-| Token validation (JWKS, issuer, audience) | `app/auth.py` |
+| Token verification (JWKS, issuer, audience) | oauth2-proxy (`docker-compose.yml`: `SKIP_JWT_BEARER_TOKENS` + `OIDC_EXTRA_AUDIENCES`) |
+| Decoding the proxy-forwarded token (no re-verification) | `app/auth.py:decode_forwarded_claims` (shared by both flavours) |
 | Job pattern for long-running tools (`start_job` / `get_job_status` / `get_job_result` / `cancel_job`) | `app/jobs.py` (mounted in `app/main.py`; reused by `fastmcp_app/main.py`) |
-| 401 + `WWW-Authenticate` pointing at resource metadata (RFC 9728 §5.1) | `app/auth.py:_unauthorized` |
+| 401 + `WWW-Authenticate` pointing at resource metadata (RFC 9728 §5.1) | `app/auth.py:_unauthorized` (mostly moot behind the proxy — its 401s are bare) |
 | Protected resource metadata (RFC 9728) | `app/main.py:protected_resource_metadata` |
 | AS metadata, login UI, consent, token issuance, PKCE | Keycloak (`keycloak/realm-mcp.json`) |
 | Client identity (CIMD / SEP-991) | Keycloak `--features=cimd` + `clientProfiles`/`clientPolicies` in the realm file |
@@ -147,6 +171,11 @@ claude mcp add --transport http hello-mcp-fastmcp http://localhost:8000/mcp
   to avoid. It has a fixed `client_id` (`claude-code`) and a fixed localhost redirect URI,
   so clients must supply both a matching `--client-id` and `--callback-port` (see
   "Alternative: static pre-registered client" above).
+- **`oauth2-proxy` client** is the realm's only confidential client (has a `secret`); the
+  proxy uses it for the browser cookie flow at `/oauth2/sign_in`. The bearer-JWT path MCP
+  clients take needs only the realm's public JWKS. Related: `KC_HOSTNAME` is pinned to
+  `http://localhost:8080` in docker-compose so tokens redeemed in-network (at
+  `http://keycloak:8080`) still carry the `localhost` issuer the proxy expects.
 - **`test-cli` client** allows headless testing via the password grant:
 
 ```bash
@@ -159,11 +188,13 @@ curl -s http://localhost:8000/me -H "Authorization: Bearer $TOKEN"
 ## Security rules baked in (from the MCP auth spec)
 
 - Token must arrive as `Authorization: Bearer ...` on **every** request — never in the URL.
-- The server validates the token was issued **for this server** (audience check) — it must
-  not accept arbitrary tokens from the same IdP, and must never forward the client's token
-  upstream (token passthrough is forbidden).
-- Invalid/missing token → `401` with a `WWW-Authenticate` header pointing at the resource
-  metadata; insufficient permissions → `403`.
+- The resource server side validates the token was issued **for this server** (audience
+  check, now enforced by oauth2-proxy's `--oidc-extra-audiences`) — it must not accept
+  arbitrary tokens from the same IdP, and must never forward the client's token to
+  *third-party* upstreams (proxy → its own resource server, as here, is the one legitimate
+  hop; token passthrough beyond the resource server is forbidden).
+- Invalid/missing token → `401` (from the proxy; bare, no `resource_metadata` hint —
+  clients rely on well-known discovery); insufficient permissions → `403`.
 
 ## Toward real hosting
 
@@ -173,3 +204,6 @@ curl -s http://localhost:8000/me -H "Authorization: Bearer $TOKEN"
   instance or a hosted IdP with MCP support (Auth0, WorkOS, etc.).
 - Tighten the CIMD trusted-domain list to exactly the clients you expect, and remove the
   legacy anonymous-DCR registration policy.
+- Close the trust-boundary hole: make the app on :8001 unreachable except from
+  oauth2-proxy (private network / container network / mTLS), or re-enable in-app JWT
+  verification as defense in depth.

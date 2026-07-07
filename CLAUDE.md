@@ -7,22 +7,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A learning sandbox for MCP (Model Context Protocol) servers. A FastAPI app exposes REST
 endpoints as MCP tools over streamable HTTP (via `fastapi-mcp`), protected with OAuth 2.1
 per the MCP authorization spec, with Keycloak as the authorization server using CIMD
-(Client ID Metadata Documents, SEP-991) for client identity. The git history is part of
-the lesson: it traces no-auth → DCR-with-registration-proxy → CIMD; read it before
-re-introducing patterns that were deliberately removed.
+(Client ID Metadata Documents, SEP-991) for client identity, and oauth2-proxy as the
+token-verifying gatekeeper on the public port. The git history is part of the lesson: it
+traces no-auth → DCR-with-registration-proxy → CIMD → oauth2-proxy-in-front; read it
+before re-introducing patterns that were deliberately removed.
 
 ## Commands
 
 ```bash
-# Keycloak (authorization server) — realm "mcp" auto-imports on start, takes ~30s
+# Keycloak (authorization server, :8080) + oauth2-proxy (gatekeeper, public :8000) —
+# realm "mcp" auto-imports on start, takes ~30s
 docker compose up -d
 
-# The API / MCP server (Python 3.13, uv-managed)
-uv run uvicorn app.main:app --reload --port 8000
+# The API / MCP server (Python 3.13, uv-managed) — :8001, BEHIND the proxy
+uv run uvicorn app.main:app --reload --port 8001
 
 # Alternative implementation of the SAME server using the MCP SDK's FastMCP instead of
-# fastapi-mcp (same realm/audience/tools; run INSTEAD of app.main — it takes port 8000 too)
-uv run uvicorn fastmcp_app.main:app --reload --port 8000
+# fastapi-mcp (same realm/audience/tools; run INSTEAD of app.main — it takes port 8001 too)
+uv run uvicorn fastmcp_app.main:app --reload --port 8001
 
 # Register in Claude Code (auth via /mcp → Authenticate; test user alex/alex123)
 claude mcp add --transport http hello-mcp http://localhost:8000/mcp
@@ -47,25 +49,38 @@ curl -s http://localhost:8000/me -H "Authorization: Bearer $TOKEN"
   — a plain restart keeps the container DB and the import is skipped (`IGNORE_EXISTING`).
 - Keycloak admin console: http://localhost:8080 (admin/admin). Debugging auth failures:
   `docker logs testing-mcp-keycloak-1` — client-policy trace logging is enabled in
-  docker-compose.yml.
+  docker-compose.yml. Proxy-side failures (401s on valid-looking tokens, 302s where a
+  401 was expected, 502s): `docker logs testing-mcp-oauth2-proxy-1`.
 - There are no tests or linters configured.
 
 ## Architecture
 
-Three parties, strict role separation (the spec's core lesson — keep it that way):
+Four parties, strict role separation (the spec's core lesson — keep it that way):
 
-- **`app/` is a pure OAuth resource server.** It never logs anyone in and serves no
-  authorization-server metadata. `app/auth.py:verify_token` validates JWTs against
-  Keycloak's JWKS (signature + issuer + audience) and returns 401 with a
-  `WWW-Authenticate` header pointing at `/.well-known/oauth-protected-resource`
-  (RFC 9728, served in `app/main.py`), which names Keycloak as the authorization server.
+- **oauth2-proxy is the token-verifying gatekeeper** (docker-compose service, owns the
+  public :8000, upstreams to uvicorn on :8001 via `host.docker.internal`). It verifies
+  every bearer JWT — signature via Keycloak's JWKS (fetched in-network at
+  `keycloak:8080`), issuer, audience — using `--skip-jwt-bearer-tokens` +
+  `--oidc-extra-audiences`. API paths (`^/mcp`, `^/me`, `^/jobs`) get a **bare 401**
+  (no `resource_metadata` hint) instead of a login redirect; `/.well-known/` and
+  `/hello` pass through unauthenticated (Claude Code's discovery chain probes the
+  well-known paths itself, so the missing 401 hint doesn't matter). OIDC discovery is
+  off (`--skip-oidc-discovery`) because browser-facing URLs are `localhost:8080` while
+  in-network ones are `keycloak:8080` — the four endpoint URLs are set explicitly.
+- **`app/` is a resource server that TRUSTS the proxy.** It never logs anyone in and
+  serves no authorization-server metadata. `app/auth.py:verify_token` no longer verifies
+  signatures — it decodes the proxy-forwarded JWT (`decode_forwarded_claims`, the
+  single-sourced helper both flavours use) and 401s only when the header is missing.
+  Direct requests to :8001 therefore bypass auth entirely — known sandbox trade-off,
+  don't "fix" it by re-adding JWKS verification without asking. The RFC 9728 metadata
+  route is still served by the app (`app/main.py`) and reached through the proxy.
   Everything else — discovery, CIMD client resolution, login, consent, PKCE, token
   issuance, refresh — happens at Keycloak.
 - **`fastmcp_app/` is the same resource server, reimplemented on the MCP SDK's
   `FastMCP`** (not fastapi-mcp). Same realm, same `http://localhost:8000/mcp` audience,
   same tools — it exists as a side-by-side comparison and is run *instead of* `app.main`
   (same port). It reuses the load-bearing constants and the job-pattern core from `app/`
-  (`fastmcp_app/auth.py` imports `AUDIENCE`/`KEYCLOAK_ISSUER` from `app.auth`;
+  (`fastmcp_app/auth.py` imports `AUDIENCE`/`decode_forwarded_claims` from `app.auth`;
   `fastmcp_app/main.py` imports the `Job`/`_run_job`/`_jobs` core from `app.jobs`), so
   keep that logic single-sourced — change it in `app/`, not by forking. See the
   "fastmcp-specifics" subsection below.
@@ -114,9 +129,17 @@ Three parties, strict role separation (the spec's core lesson — keep it that w
 ### Load-bearing strings (change all together or break auth)
 
 - `http://localhost:8000/mcp` is the token **audience**, appearing in: `AUDIENCE` in
-  `app/auth.py`, the `included.custom.audience` of the audience mappers in the realm
-  file, and the URL registered in Claude Code. Use `localhost`, not `127.0.0.1` — they
-  are distinct strings to both audience checks and Keycloak's trusted-domain matching.
+  `app/auth.py`, `OAUTH2_PROXY_OIDC_EXTRA_AUDIENCES` in docker-compose.yml (where the
+  check is actually enforced now), the `included.custom.audience` of the audience
+  mappers in the realm file, and the URL registered in Claude Code. Use `localhost`,
+  not `127.0.0.1` — they are distinct strings to both audience checks and Keycloak's
+  trusted-domain matching.
+- Port **8001** couples `OAUTH2_PROXY_UPSTREAMS` (`http://host.docker.internal:8001`
+  in docker-compose.yml) to the uvicorn `--port` — change both or the proxy 502s.
+- `KC_HOSTNAME: http://localhost:8080` (docker-compose.yml) pins the Keycloak issuer;
+  oauth2-proxy's `OIDC_ISSUER_URL` must match it byte-for-byte. Without it, tokens
+  redeemed in-network at `keycloak:8080` carry the wrong `iss` and the proxy's browser
+  cookie flow fails (the bearer path keeps working — easy to miss).
 - CIMD trusted-domain lists (two places in the realm file, executor and condition,
   with **different** JSON keys: `cimd-allow-permitted-domains` vs
   `client-id-uri-allow-permitted-domains`) validate the client metadata URL's domain

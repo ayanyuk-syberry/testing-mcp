@@ -48,6 +48,19 @@
       "attributes": {
         "pkce.code.challenge.method": "S256"
       }
+    },
+    {
+      "clientId": "oauth2-proxy",
+      "name": "oauth2-proxy (confidential reverse-proxy client, browser cookie flow for manual testing)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "oauth2-proxy-secret",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:8000/oauth2/callback"
+      ]
     }
   ],
   "clientScopes": [

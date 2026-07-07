@@ -5,8 +5,65 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Pin the issuer to the public URL: oauth2-proxy redeems auth codes
+      # in-network at http://keycloak:8080, and without a fixed hostname those
+      # tokens would carry iss=http://keycloak:8080/... and fail the proxy's
+      # issuer check. External URLs stay localhost:8080 (CIMD flow unaffected).
+      KC_HOSTNAME: http://localhost:8080
       KC_LOG_LEVEL: "info,org.keycloak.services.clientpolicy:trace,org.keycloak.protocol.oauth2.cimd:trace"
     ports:
       - "8080:8080"
     volumes:
       - ./keycloak/realm-mcp.json:/opt/keycloak/data/import/realm-mcp.json:ro
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
+    depends_on:
+      - keycloak
+    restart: unless-stopped # rides out Keycloak's ~30s boot race
+    ports:
+      - "8000:4180" # the proxy takes over the app's public port; uvicorn moves to 8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # no-op on Docker Desktop, required on Linux
+    environment:
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
+      OAUTH2_PROXY_UPSTREAMS: "http://host.docker.internal:8001"
+
+      # OIDC wiring — discovery off because browser-facing (localhost:8080) and
+      # in-network (keycloak:8080) URLs differ; each endpoint is set explicitly.
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: Keycloak
+      OAUTH2_PROXY_CLIENT_ID: oauth2-proxy
+      OAUTH2_PROXY_CLIENT_SECRET: oauth2-proxy-secret
+      OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
+      OAUTH2_PROXY_OIDC_ISSUER_URL: http://localhost:8080/realms/mcp
+      OAUTH2_PROXY_LOGIN_URL: http://localhost:8080/realms/mcp/protocol/openid-connect/auth
+      OAUTH2_PROXY_REDEEM_URL: http://keycloak:8080/realms/mcp/protocol/openid-connect/token
+      OAUTH2_PROXY_OIDC_JWKS_URL: http://keycloak:8080/realms/mcp/protocol/openid-connect/certs
+      OAUTH2_PROXY_REDIRECT_URL: http://localhost:8000/oauth2/callback
+
+      # Bearer-JWT validation — the path MCP clients take. The token's aud must
+      # match the client id or an extra audience; ours carry the resource URL.
+      OAUTH2_PROXY_SKIP_JWT_BEARER_TOKENS: "true"
+      OAUTH2_PROXY_OIDC_EXTRA_AUDIENCES: http://localhost:8000/mcp
+
+      # Routing policy: API paths get 401 (never a 302 to login); discovery and
+      # public paths pass through unauthenticated. Values are comma-split — no
+      # regex here may contain a comma.
+      OAUTH2_PROXY_API_ROUTES: "^/mcp,^/me,^/jobs"
+      OAUTH2_PROXY_SKIP_AUTH_ROUTES: "^/\\.well-known/,^/hello,^/docs,^/openapi.json"
+
+      # What reaches the upstream app (it trusts these — see app/auth.py)
+      OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "true" # forwards the verified JWT
+      OAUTH2_PROXY_PASS_ACCESS_TOKEN: "true" # X-Forwarded-Access-Token
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true" # X-Forwarded-User / X-Forwarded-Email
+
+      # Session/cookie plumbing (browser flow at /oauth2/sign_in is a
+      # manual-testing convenience; MCP clients never touch cookies)
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_COOKIE_SECRET: "yCq14wYmX0ZtLWpzE4t508GSchvShONBMd3Gf3XCOcs="
+      OAUTH2_PROXY_COOKIE_SECURE: "false" # plain-http sandbox
+      OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true" # realm has no email_verified mapper
+
+      # MCP streamable-HTTP/SSE: the default 1s flush is too coarse
+      OAUTH2_PROXY_FLUSH_INTERVAL: 100ms
